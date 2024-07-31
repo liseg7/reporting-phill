@@ -1,0 +1,29 @@
+{
+  "name": "oidc-auth",
+  "module": "main.ts",
+  "type": "module",
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "@aws-crypto/crc32c": "^5.2.0",
+    "@google-cloud/kms": "^4.5.0",
+    "@hono/node-server": "^1.12.0",
+    "@octokit/graphql-schema": "^15.25.0",
+    "date-fns-tz": "^3.1.3",
+    "hono": "^4.4.10",
+    "langchain": "^0.2.11",
+    "nanoid": "^5.0.7",
+    "oauth4webapi": "^2.11.1",
+    "octokit": "^4.0.2",
+    "openai": "^4.53.2",
+    "os": "^0.1.2",
+    "remeda": "^2.2.1",
+    "ts-pattern": "^5.2.0",
+    "uint8array-extras": "^1.2.0",
+    "zod": "^3.23.8"
+  }
+}
