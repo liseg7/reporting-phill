@@ -43,8 +43,9 @@ export const config = {
       secret: values.GITHUB_OAUTH_CLIENT_SECRET,
     },
   },
-  key: "projects/phill-1599571548621/locations/europe-west1/keyRings/tokens/cryptoKeys/github",
-  open_ai_key: values.OPENAI_API_KEY,
+  cryptoKey:
+    "projects/phill-1599571548621/locations/europe-west1/keyRings/tokens/cryptoKeys/github",
+  openAiKey: values.OPENAI_API_KEY,
 };
 
 // epoch - milliseconds
@@ -153,7 +154,7 @@ app.get("/auth/github/callback", async (c) => {
 
   const bytes = await encrypt(
     new TextEncoder().encode(response.refresh_token),
-    config.key
+    config.cryptoKey
   );
   const buffer = Buffer.from(bytes);
   const base64String = buffer.toString("base64");
@@ -214,7 +215,7 @@ app.get("commits", async (c) => {
       new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength)
   );
   const refreshToken = new TextDecoder().decode(
-    await decrypt(bytes, config.key)
+    await decrypt(bytes, config.cryptoKey)
   );
 
   let accessToken = "";
@@ -243,7 +244,7 @@ app.get("commits", async (c) => {
 
   // THIS PART NEEDS TO BE SET IN PHILL BASED UPON WHICH REPO THEY CHOOSE
   const repoName = "alumni-api";
-  const message: ListMessage = {
+  const message: Message = {
     repo: repoName,
     since: start,
     until: end,
@@ -251,8 +252,8 @@ app.get("commits", async (c) => {
     owner: "Panenco",
   };
 
-  const listCommits = await paginatedCommits(client, message);
-  const summary = await summarizeCommits(listCommits, repoName);
+  const commits = await getCommits(client, message);
+  const summary = await summarizeCommits(commits, repoName);
 
   return c.text(summary);
 });
@@ -289,7 +290,7 @@ app.get("prs", async (c) => {
       new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength)
   );
   const refreshToken = new TextDecoder().decode(
-    await decrypt(bytes, config.key)
+    await decrypt(bytes, config.cryptoKey)
   );
 
   const Client = getGitHubClient();
@@ -310,7 +311,7 @@ app.get("prs", async (c) => {
 
   // NEEDS TO BE SET IN PHILL
   const repoName = "alumni-api";
-  const message: ListMessage = {
+  const message: Message = {
     repo: repoName,
     since: start,
     until: end,
@@ -318,9 +319,9 @@ app.get("prs", async (c) => {
     owner: "Panenco",
   };
 
-  const listPrs = await listPullRequests(client, message);
+  const prs = await getPullRequests(client, message);
 
-  return c.text(await summarizePrs(listPrs, repoName));
+  return c.text(await summarizePrs(prs, repoName));
 });
 
 app.get("summary", async (c) => {
@@ -350,7 +351,7 @@ app.get("summary", async (c) => {
       new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength)
   );
   const refreshToken = new TextDecoder().decode(
-    await decrypt(bytes, config.key)
+    await decrypt(bytes, config.cryptoKey)
   );
 
   let accessToken = "";
@@ -379,7 +380,7 @@ app.get("summary", async (c) => {
 
   // NEEDS TO BE SET IN PHILL
   const repoName = "alumni-api";
-  const message: ListMessage = {
+  const message: Message = {
     repo: repoName,
     since: start,
     until: end,
@@ -387,10 +388,11 @@ app.get("summary", async (c) => {
     owner: "Panenco",
   };
 
-  const listPrs = await listPullRequests(client, message);
-  const listCommits = await paginatedCommits(client, message);
+  const prs = await getPullRequests(client, message);
 
-  return c.text(await summarize(listPrs, listCommits, repoName));
+  const commits = await getCommits(client, message);
+
+  return c.text(await summarize(prs, commits, repoName));
 });
 
 interface TokenRow {
@@ -407,7 +409,7 @@ function graphql(query: string) {
   return query;
 }
 
-type ListMessage = {
+type Message = {
   repo: string;
   since: string;
   until: string;
@@ -415,9 +417,9 @@ type ListMessage = {
   owner: string;
 };
 
-async function listPullRequests(
+async function getPullRequests(
   client: Octokit,
-  message: ListMessage
+  message: Message
 ): Promise<string> {
   const query = graphql(`
 		query paginate($cursor: String) {
@@ -449,18 +451,18 @@ async function listPullRequests(
     search: SearchResultItemConnection;
   }>(query);
 
-  const prs: PullRequest[] = [];
+  const listPrs: PullRequest[] = [];
   // iterate over pages
   for await (const response of iterator) {
     const { nodes } = response.search;
     if (!nodes || nodes.length === 0) break;
 
-    prs.push(...(nodes as PullRequest[]));
+    listPrs.push(...(nodes as PullRequest[]));
   }
 
-  let listPrs = prs.map((pr) => pr.body).join(", ");
+  let prs = listPrs.map((pr) => pr.body).join(", ");
 
-  return listPrs;
+  return prs;
 }
 
 export const getDates = async () => {
@@ -472,10 +474,7 @@ export const getDates = async () => {
   return [since.toISOString(), until.toISOString()];
 };
 
-export const paginatedCommits = async (
-  client: Octokit,
-  message: ListMessage
-) => {
+export const getCommits = async (client: Octokit, message: Message) => {
   const iterator = client.paginate.iterator(client.rest.repos.listCommits, {
     owner: message.owner,
     repo: message.repo,
@@ -492,7 +491,7 @@ export const paginatedCommits = async (
   return commitMessages.join(", ");
 };
 
-async function summarizeCommits(list_commits: string, repo_name: string) {
+async function summarizeCommits(commits: string, repoName: string) {
   const prompt = ChatPromptTemplate.fromMessages([
     [
       "human",
@@ -526,18 +525,14 @@ async function summarizeCommits(list_commits: string, repo_name: string) {
   const chain = prompt.pipe(model).pipe(outputParser);
 
   const response = await chain.invoke({
-    repo_name: repo_name,
-    commits: list_commits,
+    repo_name: repoName,
+    commits: commits,
   });
 
   return response;
 }
 
-async function summarize(
-  list_prs: string,
-  list_commits: string,
-  repo_name: string
-) {
+async function summarize(prs: string, commits: string, repoName: string) {
   const prompt = ChatPromptTemplate.fromMessages([
     [
       "human",
@@ -571,15 +566,15 @@ async function summarize(
   const chain = prompt.pipe(model).pipe(outputParser);
 
   const response = await chain.invoke({
-    repo_name: repo_name,
-    commits: list_commits,
-    prs: list_prs,
+    repo_name: repoName,
+    commits: commits,
+    prs: prs,
   });
 
   return response;
 }
 
-async function summarizePrs(list_prs: string, repo_name: string) {
+async function summarizePrs(prs: string, repoName: string) {
   const prompt = ChatPromptTemplate.fromMessages([
     [
       "human",
@@ -613,8 +608,8 @@ async function summarizePrs(list_prs: string, repo_name: string) {
   const chain = prompt.pipe(model).pipe(outputParser);
 
   const response = await chain.invoke({
-    repo_name: repo_name,
-    prs: list_prs,
+    repo_name: repoName,
+    prs: prs,
   });
 
   return response;
