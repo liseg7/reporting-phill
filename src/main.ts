@@ -4,7 +4,6 @@ import { Database } from "bun:sqlite";
 import { getCookie, setCookie } from "hono/cookie";
 import { pipe } from "remeda";
 import { base64ToString, stringToBase64 } from "uint8array-extras";
-import OpenAI from "openai";
 import { ChatOpenAI } from "@langchain/openai";
 import { ChatPromptTemplate } from "@langchain/core/prompts";
 import { StringOutputParser } from "@langchain/core/output_parsers";
@@ -20,7 +19,7 @@ import {
   createOAuthUserAuth,
   type GitHubAppStrategyOptionsExistingAuthenticationWithExpiration,
 } from "@octokit/auth-oauth-user";
-import { decrypt, encrypt } from "./cryption.js";
+import { decrypt, encrypt } from "./crypto.js";
 
 const seconds = {
   minute: 60,
@@ -37,8 +36,6 @@ const ENV_SCHEMA = z.object({
 
 const values = ENV_SCHEMA.parse(process.env);
 
-const key =
-  "projects/phill-1599571548621/locations/europe-west1/keyRings/tokens/cryptoKeys/github";
 export const config = {
   oauth: {
     github: {
@@ -46,14 +43,12 @@ export const config = {
       secret: values.GITHUB_OAUTH_CLIENT_SECRET,
     },
   },
+  key: "projects/phill-1599571548621/locations/europe-west1/keyRings/tokens/cryptoKeys/github",
+  open_ai_key: values.OPENAI_API_KEY,
 };
 
-const openai = new OpenAI({
-  apiKey: values.OPENAI_API_KEY,
-});
-
 // epoch - milliseconds
-export const map = new Map<
+export const accessTokenMap = new Map<
   string,
   { accessToken: string; expiresEpoch: number }
 >();
@@ -96,7 +91,7 @@ app.get("/", (c) => {
       &nbsp
       <a href="/commits?user_id=${userID}"> See my commits </a>
       &nbsp
-      <a href="/PRs?user_id=${userID}"> See my PRs </a>
+      <a href="/prs?user_id=${userID}"> See my pull requests </a>
       &nbsp
       <a href="/summary?user_id=${userID}"> Summary of what I did today! </a>
 		</body>
@@ -150,36 +145,33 @@ app.get("/auth/github/callback", async (c) => {
 
   const currentTimestamp = Date.now();
 
-  const endDate =
+  const refreshTokenExpirationTimestamp =
     currentTimestamp + (response.refresh_token_expires_in as number) * 1000;
 
   const octokit = new Octokit({ auth: response.access_token });
   const userName = (await octokit.request("GET /user")).data.login;
 
-  // encrypt the refresh token
   const bytes = await encrypt(
     new TextEncoder().encode(response.refresh_token),
-    key
+    config.key
   );
   const buffer = Buffer.from(bytes);
   const base64String = buffer.toString("base64");
 
-  // Save userId, refresh token, expiration date of the refresh token and the user name to db
   db.query(
-    "insert into tokens (user_id, refresh_token, expiration_date, user_name) values ($userId, $refreshToken, $endDate, $userName)"
+    "insert into tokens (user_id, refresh_token, expiration_date, user_name) values ($userId, $refreshToken, $expirationDateToken, $userName)"
   ).all({
     $userId: userID!,
     $refreshToken: base64String,
-    $endDate: endDate,
+    $expirationDateToken: refreshTokenExpirationTimestamp,
     $userName: userName,
   });
 
-  // save the userId, access token and the expiration date of the access token in memory
-  const endDate_access =
+  const accessTokenExpirationTimestamp =
     currentTimestamp + (response.expires_in as number) * 1000;
-  map.set(userID, {
+  accessTokenMap.set(userID, {
     accessToken: response.access_token,
-    expiresEpoch: endDate_access,
+    expiresEpoch: accessTokenExpirationTimestamp,
   });
   return c.redirect(`/?user_id=${userID}`);
 });
@@ -210,37 +202,39 @@ app.get("commits", async (c) => {
     .all({ $userID: userID as string })) as TokenRow[];
 
   if (rows.length === 0) {
-    throw new Error("User not found in database. Log in with github first");
+    return c.json("Unauthorized", 401);
   }
 
   const { refresh_token, expiration_date } = rows[0];
-  const Client = getGitHubClient();
 
-  // decrypt the refresh token
-  const buffer = Buffer.from(refresh_token, "base64");
-  const uint8Array = new Uint8Array(buffer);
-  const decryptedTemp = await decrypt(uint8Array, key);
-  const decrypted = new TextDecoder().decode(decryptedTemp);
+  const bytes = pipe(
+    refresh_token,
+    (x) => Buffer.from(x, "base64"),
+    (buffer) =>
+      new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength)
+  );
+  const refreshToken = new TextDecoder().decode(
+    await decrypt(bytes, config.key)
+  );
 
-  // if present get the access token and its expiration date from memory
-  let accessToken: string | undefined;
-  let expirationAccessToken: string = new Date().toISOString();
-  const token = map.get(userID);
+  let accessToken = "";
+  let accessTokenExpiration: string = new Date().toISOString();
+  const token = accessTokenMap.get(userID);
   if (token && token.expiresEpoch > Date.now()) {
     accessToken = token.accessToken;
-    expirationAccessToken = new Date(token.expiresEpoch).toISOString();
+    accessTokenExpiration = new Date(token.expiresEpoch).toISOString();
   }
 
-  // setup github client
+  const Client = getGitHubClient();
   let client = new Client({
     authStrategy: createOAuthUserAuth,
     auth: {
       clientType: "github-app",
       clientId: config.oauth.github.clientID,
       clientSecret: config.oauth.github.secret,
-      token: accessToken || "",
-      refreshToken: decrypted,
-      expiresAt: expirationAccessToken,
+      token: accessToken,
+      refreshToken: refreshToken,
+      expiresAt: accessTokenExpiration,
       refreshTokenExpiresAt: new Date(expiration_date).toISOString(),
     } satisfies GitHubAppStrategyOptionsExistingAuthenticationWithExpiration,
   });
@@ -250,10 +244,11 @@ app.get("commits", async (c) => {
   // THIS PART NEEDS TO BE SET IN PHILL BASED UPON WHICH REPO THEY CHOOSE
   const repoName = "alumni-api";
   const message: ListMessage = {
-    repos: repoName,
+    repo: repoName,
     since: start,
     until: end,
     author: rows[0].user_name,
+    owner: "Panenco",
   };
 
   const listCommits = await paginatedCommits(client, message);
@@ -262,7 +257,7 @@ app.get("commits", async (c) => {
   return c.text(summary);
 });
 
-app.get("PRs", async (c) => {
+app.get("prs", async (c) => {
   const userID = c.req.query("user_id");
 
   if (!userID) {
@@ -272,39 +267,41 @@ app.get("PRs", async (c) => {
   const rows = (await db
     .query("select * from tokens where user_id = $userID")
     .all({ $userID: userID as string })) as TokenRow[];
-  const Client = getGitHubClient();
 
   if (rows.length === 0) {
-    throw new Error("User not found in database. Log in with github first");
+    return c.json("Unauthorized", 401);
   }
 
   const { refresh_token, expiration_date } = rows[0];
 
-  // if present get accessToken and its expiration date from memory
-  let accessToken: string | undefined;
-  let expirationAccessToken: string = new Date().toISOString();
-  const token = map.get(userID);
+  let accessToken = "";
+  let accessTokenExpiration: string = new Date().toISOString();
+  const token = accessTokenMap.get(userID);
   if (token && token.expiresEpoch > Date.now()) {
     accessToken = token.accessToken;
-    expirationAccessToken = new Date(token.expiresEpoch).toISOString();
+    accessTokenExpiration = new Date(token.expiresEpoch).toISOString();
   }
 
-  // decrypt the refresh token
-  const buffer = Buffer.from(refresh_token, "base64");
-  const uint8Array = new Uint8Array(buffer);
-  const decryptedTemp = await decrypt(uint8Array, key);
-  const decrypted = new TextDecoder().decode(decryptedTemp);
+  const bytes = pipe(
+    refresh_token,
+    (x) => Buffer.from(x, "base64"),
+    (buffer) =>
+      new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength)
+  );
+  const refreshToken = new TextDecoder().decode(
+    await decrypt(bytes, config.key)
+  );
 
-  // create github client
+  const Client = getGitHubClient();
   const client = new Client({
     authStrategy: createOAuthUserAuth,
     auth: {
       clientType: "github-app",
       clientId: config.oauth.github.clientID,
       clientSecret: config.oauth.github.secret,
-      token: accessToken || "",
-      refreshToken: decrypted,
-      expiresAt: expirationAccessToken,
+      token: accessToken,
+      refreshToken: refreshToken,
+      expiresAt: accessTokenExpiration,
       refreshTokenExpiresAt: new Date(expiration_date).toISOString(),
     } satisfies GitHubAppStrategyOptionsExistingAuthenticationWithExpiration,
   });
@@ -314,10 +311,11 @@ app.get("PRs", async (c) => {
   // NEEDS TO BE SET IN PHILL
   const repoName = "alumni-api";
   const message: ListMessage = {
-    repos: repoName,
+    repo: repoName,
     since: start,
     until: end,
     author: rows[0].user_name,
+    owner: "Panenco",
   };
 
   const listPrs = await listPullRequests(client, message);
@@ -335,10 +333,9 @@ app.get("summary", async (c) => {
   const rows = (await db
     .query("select * from tokens where user_id = $userID")
     .all({ $userID: userID as string })) as TokenRow[];
-  const Client = getGitHubClient();
 
   if (rows.length === 0) {
-    throw new Error("User not found in database. Log in with github first");
+    return c.json("Unauthorized", 401);
   }
   const { refresh_token, expiration_date } = rows[0];
 
@@ -346,31 +343,34 @@ app.get("summary", async (c) => {
     throw "refresh token has expired log in again";
   }
 
-  // decrypt the refresh token
-  const buffer = Buffer.from(refresh_token, "base64");
-  const uint8Array = new Uint8Array(buffer);
-  const decryptedTemp = await decrypt(uint8Array, key);
-  const decrypted = new TextDecoder().decode(decryptedTemp);
+  const bytes = pipe(
+    refresh_token,
+    (x) => Buffer.from(x, "base64"),
+    (buffer) =>
+      new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength)
+  );
+  const refreshToken = new TextDecoder().decode(
+    await decrypt(bytes, config.key)
+  );
 
-  // if present in memory get the access token and its expiration date
-  let accessToken: string | undefined;
-  let expirationAccessToken: string = new Date().toISOString();
-  const token = map.get(userID);
+  let accessToken = "";
+  let accessTokenExpiration: string = new Date().toISOString();
+  const token = accessTokenMap.get(userID);
   if (token && token.expiresEpoch > Date.now()) {
     accessToken = token.accessToken;
-    expirationAccessToken = new Date(token.expiresEpoch).toISOString();
+    accessTokenExpiration = new Date(token.expiresEpoch).toISOString();
   }
 
-  // set up github client
+  const Client = getGitHubClient();
   const client = new Client({
     authStrategy: createOAuthUserAuth,
     auth: {
       clientType: "github-app",
       clientId: config.oauth.github.clientID,
       clientSecret: config.oauth.github.secret,
-      token: accessToken || "",
-      refreshToken: decrypted,
-      expiresAt: expirationAccessToken,
+      token: accessToken,
+      refreshToken: refreshToken,
+      expiresAt: accessTokenExpiration,
       refreshTokenExpiresAt: new Date(expiration_date).toISOString(),
     } satisfies GitHubAppStrategyOptionsExistingAuthenticationWithExpiration,
   });
@@ -380,10 +380,11 @@ app.get("summary", async (c) => {
   // NEEDS TO BE SET IN PHILL
   const repoName = "alumni-api";
   const message: ListMessage = {
-    repos: repoName,
+    repo: repoName,
     since: start,
     until: end,
     author: rows[0].user_name,
+    owner: "Panenco",
   };
 
   const listPrs = await listPullRequests(client, message);
@@ -399,15 +400,19 @@ interface TokenRow {
   user_name: string;
 }
 
+/*
+Utility function for LSP to kick-in
+ */
 function graphql(query: string) {
   return query;
 }
 
 type ListMessage = {
-  repos: string;
+  repo: string;
   since: string;
   until: string;
   author: string;
+  owner: string;
 };
 
 async function listPullRequests(
@@ -416,24 +421,17 @@ async function listPullRequests(
 ): Promise<string> {
   const query = graphql(`
 		query paginate($cursor: String) {
-			search(query: "is:pr author:${message.author} created:${message.since}..${message.until} repo:Panenco/${message.repos}",  type: ISSUE, first: 100, after: $cursor) {
+			search(query: "is:pr author:${message.author} created:${message.since}..${message.until} repo:${message.owner}/${message.repo}",  type: ISSUE, first: 100, after: $cursor) {
 				nodes {
 					... on PullRequest {
 						title
 						state
 						url
 						createdAt
-                        commits(first: 5) {  
-                            nodes {
-                                commit {
-                                    message
-                                    authoredDate
-                                        }
-                                    }
-                            }
-                        author{
-                        login
-                        }
+            body
+            author{
+                login
+                }
 						repository {
 							nameWithOwner
 						}  
@@ -460,40 +458,18 @@ async function listPullRequests(
     prs.push(...(nodes as PullRequest[]));
   }
 
-  let list_prs = "";
-  for (let i = 0; i < prs.length; i++) {
-    for (let j = 0; j < prs[i].commits.nodes!.length; j++) {
-      list_prs = list_prs + prs[i].commits.nodes![j]!.commit.message + ", ";
-    }
-  }
+  let listPrs = prs.map((pr) => pr.body).join(", ");
 
-  return list_prs;
+  return listPrs;
 }
 
 export const getDates = async () => {
-  const now = new Date();
-  const beginningOfDay = new Date(
-    now.getUTCFullYear(),
-    now.getUTCMonth(),
-    now.getUTCDate() - 10,
-    0,
-    0,
-    0,
-    0
-  );
-  const start = beginningOfDay.toISOString();
-  const endOfDay = new Date(
-    now.getUTCFullYear(),
-    now.getUTCMonth(),
-    now.getUTCDate(),
-    23,
-    59,
-    59,
-    999
-  );
-
-  const end = endOfDay.toISOString();
-  return [start, end];
+  const since = new Date();
+  since.setHours(0, 0, 0);
+  since.setDate(20); //THIS IS USED FOR TESTING REMOVE IN PHILL
+  const until = new Date();
+  until.setHours(23, 59, 59);
+  return [since.toISOString(), until.toISOString()];
 };
 
 export const paginatedCommits = async (
@@ -501,23 +477,19 @@ export const paginatedCommits = async (
   message: ListMessage
 ) => {
   const iterator = client.paginate.iterator(client.rest.repos.listCommits, {
-    owner: "Panenco",
-    repo: message.repos,
+    owner: message.owner,
+    repo: message.repo,
     author: message.author,
     since: message.since,
     until: message.until,
-    per_page: 100, // Number of results per page
+    per_page: 100,
   });
 
-  let list_commits = "";
-  // Iterate over each response in the paginated results
+  const commitMessages = [];
   for await (const { data: commits } of iterator) {
-    // `commits` is an array of commit objects from the current page
-    for (const commit of commits) {
-      list_commits = list_commits + commit.commit.message + ", ";
-    }
+    commitMessages.push(...commits.map((commit) => commit.commit.message));
   }
-  return list_commits;
+  return commitMessages.join(", ");
 };
 
 async function summarizeCommits(list_commits: string, repo_name: string) {

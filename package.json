@@ -1,6 +1,6 @@
 {
-  "name": "oidc-auth",
-  "module": "main.ts",
+  "name": "reporting-phill",
+  "module": "src/main.ts",
   "type": "module",
   "devDependencies": {
     "@types/bun": "latest"
@@ -20,7 +20,6 @@
     "oauth4webapi": "^2.11.1",
     "octokit": "^4.0.2",
     "openai": "^4.53.2",
-    "os": "^0.1.2",
     "remeda": "^2.2.1",
     "ts-pattern": "^5.2.0",
     "uint8array-extras": "^1.2.0",
