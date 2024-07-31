@@ -252,8 +252,8 @@ app.get("commits", async (c) => {
     owner: "Panenco",
   };
 
-  const commits = await getCommits(client, message);
-  const summary = await summarizeCommits(commits, repoName);
+  const commits = await getCommitsDescriptions(client, message);
+  const summary = await summarizeCommits(commits.join(" ,"), repoName);
 
   return c.text(summary);
 });
@@ -319,9 +319,9 @@ app.get("prs", async (c) => {
     owner: "Panenco",
   };
 
-  const prs = await getPullRequests(client, message);
+  const prs = await getPullRequestsDescriptions(client, message);
 
-  return c.text(await summarizePrs(prs, repoName));
+  return c.text(await summarizePrs(prs.join(","), repoName));
 });
 
 app.get("summary", async (c) => {
@@ -388,11 +388,11 @@ app.get("summary", async (c) => {
     owner: "Panenco",
   };
 
-  const prs = await getPullRequests(client, message);
+  const prs = await getPullRequestsDescriptions(client, message);
 
-  const commits = await getCommits(client, message);
+  const commits = await getCommitsDescriptions(client, message);
 
-  return c.text(await summarize(prs, commits, repoName));
+  return c.text(await summarize(prs.join(","), commits.join(","), repoName));
 });
 
 interface TokenRow {
@@ -417,10 +417,10 @@ type Message = {
   owner: string;
 };
 
-async function getPullRequests(
+async function getPullRequestsDescriptions(
   client: Octokit,
   message: Message
-): Promise<string> {
+): Promise<string[]> {
   const query = graphql(`
 		query paginate($cursor: String) {
 			search(query: "is:pr author:${message.author} created:${message.since}..${message.until} repo:${message.owner}/${message.repo}",  type: ISSUE, first: 100, after: $cursor) {
@@ -460,7 +460,7 @@ async function getPullRequests(
     listPrs.push(...(nodes as PullRequest[]));
   }
 
-  let prs = listPrs.map((pr) => pr.body).join(", ");
+  let prs = listPrs.map((pr) => pr.body);
 
   return prs;
 }
@@ -474,7 +474,10 @@ export const getDates = async () => {
   return [since.toISOString(), until.toISOString()];
 };
 
-export const getCommits = async (client: Octokit, message: Message) => {
+export const getCommitsDescriptions = async (
+  client: Octokit,
+  message: Message
+) => {
   const iterator = client.paginate.iterator(client.rest.repos.listCommits, {
     owner: message.owner,
     repo: message.repo,
@@ -488,7 +491,7 @@ export const getCommits = async (client: Octokit, message: Message) => {
   for await (const { data: commits } of iterator) {
     commitMessages.push(...commits.map((commit) => commit.commit.message));
   }
-  return commitMessages.join(", ");
+  return commitMessages;
 };
 
 async function summarizeCommits(commits: string, repoName: string) {
