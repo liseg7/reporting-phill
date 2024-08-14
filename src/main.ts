@@ -392,13 +392,13 @@ app.get("/api/summary", async (c) => {
   const [start, end] = await getDates();
 
   // NEEDS TO BE SET IN PHILL
-  const repoName = "alumni-api";
+  const repoName = "reporting-phill";
   const message: Message = {
     repo: repoName,
     since: start,
     until: end,
     author: rows[0].user_name,
-    owner: "Panenco",
+    owner: "liseg7",
   };
 
   const prs = await getPullRequestsDescriptions(client, message);
@@ -473,7 +473,7 @@ async function getPullRequestsDescriptions(
     listPrs.push(...(nodes as PullRequest[]));
   }
 
-  let prs = listPrs.map((pr) => pr.body);
+  let prs = listPrs.map((pr) => pr.title + pr.body);
 
   return prs;
 }
@@ -481,7 +481,7 @@ async function getPullRequestsDescriptions(
 export const getDates = async () => {
   const since = new Date();
   since.setHours(0, 0, 0);
-  since.setDate(20); //THIS IS USED FOR TESTING REMOVE IN PHILL
+  since.setMonth(6); //THIS IS USED FOR TESTING REMOVE IN PHILL
   const until = new Date();
   until.setHours(23, 59, 59);
   return [since.toISOString(), until.toISOString()];
@@ -511,7 +511,7 @@ async function summarizeCommits(commits: string, repoName: string) {
   const prompt = ChatPromptTemplate.fromMessages([
     [
       "human",
-      `If the list {commits} is empty say: I didn't work on the {repo_name} today. Don't say anything else.
+      `If the list {commits} is empty only say: I didn't work on the {repo_name} today. 
        Else if the list of {commits} is NOT empty:
        Summarize the given list of commit messages {commits} that a person made in a repository {repo_name} today in first person.
        Be as specific and as concise as possible based on the commit messages.
@@ -549,29 +549,18 @@ async function summarizeCommits(commits: string, repoName: string) {
 }
 
 async function summarize(prs: string, commits: string, repoName: string) {
+  console.log("commits", commits);
+  console.log("prs", prs);
+
   const prompt = ChatPromptTemplate.fromMessages([
     [
       "human",
-      `If the list {commits} and {prs} is empty say: I didn't work on the {repo_name} today. Don't say anything else.
+      `If the list {commits} and {prs} is empty only say: I didn't work on {repo_name} today.
       Else if the list of {commits} and {prs} is NOT empty:
        Summarize the given list of commit messages {commits} and pull requests {prs} that a person made in a repository {repo_name} today in first person.
-       Be as specific and as concise as possible based on the messages.
-      In no more than 5 bullet points while only mentioning the most important changes which have the biggest impact on the repository.
-       If some parts of the list seem redundant remove them. Don't add extra sentences explaining the structure of the response.
-       
-       Format the output as follows:
-       First give one sentence summarizing all the commits in {commits} and pull requests in {prs}. 
-       Second say "More specifically the following actions were undertaken: "
-       Third give a list of the 5 most important commits made {commits} and pull requests made {prs} use bullet points and choosing the most important commits and pull requests to mention.
-        
-       Example of a good structure:
-       One sentence summarizing what I did today based on the commits and pull requests in first person.
-       More specifically the following actions were undertaken:
-        -  important element of the commits/pull request
-        -  important element of the commits/pull request
-        -  important element of the commits/pull request
-        -  important element of the commits/pull request
-        -  important element of the commits/pull request
+       Be as specific and as concise as possible based on the messages. Summarize everything in 2 short sentences by only mentioning the most important parts. 
+       The shorter the sentences the better.
+    
        `,
     ],
   ]);
@@ -594,7 +583,7 @@ async function summarizePrs(prs: string, repoName: string) {
   const prompt = ChatPromptTemplate.fromMessages([
     [
       "human",
-      `If the list {prs} is empty say: I didn't work on the {repo_name} today. Don't say anything else.
+      `If the list {prs} is empty only say: I didn't work on {repo_name} today.
        Else if the list {prs} is NOT empty:
        Summarize the given list of pull request messages {prs} that a person made in a repository {repo_name} today in first person.
        Be as specific and as concise as possible based on the pull request message.
