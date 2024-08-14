@@ -19,6 +19,7 @@ import {
   createOAuthUserAuth,
   type GitHubAppStrategyOptionsExistingAuthenticationWithExpiration,
 } from "@octokit/auth-oauth-user";
+import { refreshToken as refreshTokenFunction } from "@octokit/oauth-methods";
 import { decrypt, encrypt } from "./crypto.js";
 
 const seconds = {
@@ -86,20 +87,20 @@ app.get("/", (c) => {
   return c.html(`
 		<body>
 			<p> Your user id is ${userID} </p>
-			<a href="/auth/github/authorize?user_id=${userID}"> Link GitHub </a>
+			<a href="/api/auth/github/authorize?user_id=${userID}"> Link GitHub </a>
       &nbsp
-			<a href="/tokens?user_id=${userID}"> See my tokens </a>
+			<a href="/api/tokens?user_id=${userID}"> See my tokens </a>
       &nbsp
-      <a href="/commits?user_id=${userID}"> See my commits </a>
+      <a href="/api/commits?user_id=${userID}"> See my commits </a>
       &nbsp
-      <a href="/prs?user_id=${userID}"> See my pull requests </a>
+      <a href="/api/prs?user_id=${userID}"> See my pull requests </a>
       &nbsp
-      <a href="/summary?user_id=${userID}"> Summary of what I did today! </a>
+      <a href="/api/summary?user_id=${userID}"> Summary of what I did today! </a>
 		</body>
 		`);
 });
 
-app.get("/auth/github/authorize", async (c) => {
+app.get("/api/auth/github/authorize", async (c) => {
   const userID = c.req.query("user_id");
 
   if (!userID) {
@@ -151,6 +152,7 @@ app.get("/auth/github/callback", async (c) => {
 
   const octokit = new Octokit({ auth: response.access_token });
   const userName = (await octokit.request("GET /user")).data.login;
+  console.log(response.refresh_token);
 
   const bytes = await encrypt(
     new TextEncoder().encode(response.refresh_token),
@@ -324,7 +326,7 @@ app.get("prs", async (c) => {
   return c.text(await summarizePrs(prs.join(","), repoName));
 });
 
-app.get("summary", async (c) => {
+app.get("/api/summary", async (c) => {
   const userID = c.req.query("user_id");
 
   if (!userID) {
@@ -362,6 +364,17 @@ app.get("summary", async (c) => {
     accessTokenExpiration = new Date(token.expiresEpoch).toISOString();
   }
 
+  const { data, authentication } = await refreshTokenFunction({
+    clientType: "github-app",
+    clientId: config.oauth.github.clientID,
+    clientSecret: config.oauth.github.secret,
+    refreshToken: refreshToken,
+  });
+
+  const currentTimestamp = Date.now();
+
+  const accessTokenExpirationTimestamp =
+    currentTimestamp + (data.expires_in as number) * 1000;
   const Client = getGitHubClient();
   const client = new Client({
     authStrategy: createOAuthUserAuth,
@@ -369,9 +382,9 @@ app.get("summary", async (c) => {
       clientType: "github-app",
       clientId: config.oauth.github.clientID,
       clientSecret: config.oauth.github.secret,
-      token: accessToken,
+      token: data.access_token,
       refreshToken: refreshToken,
-      expiresAt: accessTokenExpiration,
+      expiresAt: new Date(accessTokenExpirationTimestamp).toISOString(),
       refreshTokenExpiresAt: new Date(expiration_date).toISOString(),
     } satisfies GitHubAppStrategyOptionsExistingAuthenticationWithExpiration,
   });
